@@ -1,7 +1,7 @@
 import socket, time
 import sys
 
-PARAM_DEBUG = True
+PARAM_DEBUG = False
 PARAM_RECEIVE_BUFFER_SIZE = 128
 
 PARAM_IP = "127.0.0.1"
@@ -11,21 +11,22 @@ PARAM_PORT = 5001
 def parse_arguments():
     global PARAM_IP, PARAM_PORT
 
-    if len(sys.argv) <= 1 + 0:
-        print("no args")
+    if len(sys.argv) < 1 + 2:
+        print("not enough args")
+        exit(1)
     elif len(sys.argv) > 1 + 2:
         print("too many args")
+        exit(1)
     else:
         for i in range(len(sys.argv)):
             if i == 1:
                 PARAM_IP = sys.argv[i]
             if i == 2:
-                PARAM_PORT = sys.argv[i]
+                PARAM_PORT = int(sys.argv[i])
 
 
 # making this a class so i can launch multiple consumers later for testing
 class Consumer:
-
     # initialize consumer
     def __init__(self, host, port):
         global PARAM_RECEIVE_BUFFER_SIZE
@@ -34,29 +35,32 @@ class Consumer:
         self.sc = None
         try:
             self.sc = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.sc.settimeout(10)
             self.sc.connect((host, port))
         except Exception as e:
-            print(f"socket creation failed: {e}")
+            print(f"[ ERRO ] socket creation failed: {e}")
+            self.cleanup()
             exit(1)
 
         self.indx = 0
         data = None
         try:
-            data = self.recv(PARAM_RECEIVE_BUFFER_SIZE).decode()
+            data = self.sc.recv(PARAM_RECEIVE_BUFFER_SIZE).decode()
             # parse index (indx:***)
             self.indx = int(data.split(":")[1])
         except Exception as e:
-            print(f"index retreival failed: {e}")
-            self.sc.close()
+            print(f"[ ERRO ] index retreival failed: {e}")
+            self.cleanup()
             exit(1)
 
-        print(f"connected, consumer {self.indx}")
+        print(f"[ INFO ] connected, consumer {self.indx}")
 
-    # cleanup resources
-    def __del__(self):
+    def cleanup(self):
         if self.sc is not None:
+            self.sc.shutdown(socket.SHUT_RDWR)
+            if PARAM_DEBUG:
+                print(f"[ DEBG ] closing socket")
             self.sc.close()
+            self.sc = None
 
     # return pulled event
     def pull_event(self):
@@ -72,21 +76,29 @@ class Consumer:
         while True:
             event = self.pull_event()
             if event == "\nempty":
-                print("no event in Queue")
+                print("[ PULL ] no event in queue")
             else:
-                print(f"event {event} is processed in consumer {self.indx}")
+                print(f"[ PULL ] event {event} is processed in consumer {self.indx}")
             time.sleep(1)
 
 
+consumer = None
+
 if __name__ == "__main__":
+    # parse arguments
+    if not PARAM_DEBUG:
+        parse_arguments()
+
+    # initialize consumer
     consumer = Consumer(PARAM_IP, PARAM_PORT)
 
     try:
         consumer.consumer_loop()
+
     except KeyboardInterrupt:
         # cleanup consumer
         if consumer is not None:
-            del consumer
+            consumer.cleanup()
 
         # exit msg
         print("\nexiting on SIGINT (ctrl+c)")
