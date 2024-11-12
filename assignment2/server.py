@@ -55,14 +55,14 @@ def server_init():
     global producer_connection_socket, consumer_connection_socket
 
     producer_connection_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    producer_connection_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     producer_connection_socket.bind((PARAM_SERVER_IP, PARAM_PORT_PRODUCER))
     producer_connection_socket.listen(PARAM_MAX_QUEUED_CONNECTIONS)
-    producer_connection_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
     consumer_connection_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    consumer_connection_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     consumer_connection_socket.bind((PARAM_SERVER_IP, PARAM_PORT_CONSUMER))
     consumer_connection_socket.listen(PARAM_MAX_QUEUED_CONNECTIONS)
-    consumer_connection_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
 
 def producer_worker(client_socket, client_addr, producer_indx):
