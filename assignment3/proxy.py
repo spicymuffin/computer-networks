@@ -1,7 +1,5 @@
 import socket
 import sys
-import threading
-import time
 
 PARAM_IP = "127.0.0.1"
 PARAM_PORT = 9001
@@ -9,11 +7,18 @@ PARAM_MAX_QUEUED_CONNECTIONS = 5
 
 PARAM_RECV_BUF_SIZE = 4096
 
-PARAM_DEBUG = True
+PARAM_DEBUG_DATA = False
+PARAM_DEBUG_RECV = False
+PARAM_DEBUG_OPTIONS = False
+PARAM_DEBUG_MAINLOOP = False
+PARAM_DEBUG_URLPARSE = True
+
+PARAM_CACHE_INVALIDATE = True
 
 PARAM_REDIRECT_TRIGGER = "internettrend"
 PARAM_REDIRECT_URL = "http://mnet.yonsei.ac.kr/"
 PARAM_REDIRECT_HOST = "mnet.yonsei.ac.kr"
+PARAM_REDIRECT_PATH = "/"
 
 REDIRECT_FLAG = False
 
@@ -22,6 +27,8 @@ IMAGE_FILTER_STATE = False
 
 IMAGE_FILTER_ENABLE_OPT = "image_off"
 IMAGE_FILTER_DISABLE_OPT = "image_on"
+
+request_sock_global_ref = None
 
 
 def parse_arguments():
@@ -37,7 +44,7 @@ def parse_arguments():
     else:
         for i in range(len(sys.argv)):
             if i == 1:
-                PARAM_PORT = sys.argv[i]
+                PARAM_PORT = int(sys.argv[i])
 
 
 transaction_counter = 1
@@ -105,11 +112,13 @@ def parse_header_user_agent(user_agent):
 
 
 def request_handler(client_sock, client_addr):
-    global PARAM_DEBUG, PARAM_IP, PARAM_PORT, PARAM_MAX_QUEUED_CONNECTIONS
+    global PARAM_DEBUG_DATA, PARAM_IP, PARAM_PORT, PARAM_MAX_QUEUED_CONNECTIONS
     global PARAM_RECV_BUF_SIZE
     global accept_socket
     global PARAM_REDIRECT_TRIGGER, PARAM_REDIRECT_URL, REDIRECT_FLAG
     global IMAGE_FILTER_STATE, IMAGE_FILTER_DISABLE_OPT, IMAGE_FILTER_ENABLE_OPT
+    global PARAM_CACHE_INVALIDATE
+    global request_sock_global_ref
 
     try:
         # read the request from the socket
@@ -117,12 +126,27 @@ def request_handler(client_sock, client_addr):
 
         while True:
             chunk = client_sock.recv(PARAM_RECV_BUF_SIZE)
-            if not chunk:
-                break
             data += chunk
+            if PARAM_DEBUG_RECV:
+                print(f"received chunk len={len(chunk)}")
+            # detect \r\n to break the loop
+            if b"\r\n\r\n" in chunk:
+                if PARAM_DEBUG_RECV:
+                    print("header end detected, breaking out of the loop")
+                    print("data received so far:")
+                    print(data)
+                break
+            if chunk == b"":
+                if PARAM_DEBUG_RECV:
+                    print("chunk is empty, breaking out of the loop")
+                    print("data received so far:")
+                    print(data)
+                break
 
         if not data:
             # no data received, something bad happened
+            if PARAM_DEBUG_RECV:
+                print("client closed connection")
             client_sock.close()
             return
 
@@ -134,6 +158,8 @@ def request_handler(client_sock, client_addr):
 
         # split the header into lines
         lines = request_header_decoded.split("\n")
+
+        print(lines)
 
         # parse request line
         request_line = lines[0]
@@ -165,7 +191,9 @@ def request_handler(client_sock, client_addr):
         # check if we have to enable or disable image filter
         url_options = request_url.split("?")
         url_options = url_options[1:]
-        print(url_options)
+
+        if PARAM_DEBUG_OPTIONS:
+            print("URL options:", url_options)
         if len(url_options) > 0:
             for option in url_options:
                 if option == IMAGE_FILTER_ENABLE_OPT:
@@ -180,7 +208,7 @@ def request_handler(client_sock, client_addr):
 
         # print the request
         print_stage_line(0)
-        print(f"  > {request_method} {request_url}")
+        print(f"  > {request_method} {request_url} {request_protocol}")
 
         # parse user agent to print
         if request_user_agent is not None:
@@ -193,29 +221,93 @@ def request_handler(client_sock, client_addr):
         else:
             print(f"the user agent header had less than 2 elements or was not present")
 
-        if PARAM_DEBUG:
+        if PARAM_DEBUG_DATA:
             print("received request:")
             print(request_headers)
             print(request_data)
 
-        # TODO: test that the parsing from URL works
+        # parse the path like the file without the scheme and host
+
+        path = None
+
+        if request_protocol == "HTTP/1.1" or request_protocol == "HTTP/1.0":
+            # extract only the path
+            if request_url.startswith("http://"):
+                without_scheme = request_url[7:]
+                if PARAM_DEBUG_URLPARSE:
+                    print("WITHOUT SCHEME:", without_scheme)
+                slash_idx = without_scheme.find("/")
+
+                if slash_idx != -1:
+                    path = without_scheme[slash_idx:]
+                    if PARAM_DEBUG_URLPARSE:
+                        print("PATH:", path)
+                else:
+                    # no path means just '/'
+                    path = "/"
+
+            else:
+                # URL doesn't start with http://, assume it's already a relative path
+                path = request_url
+
+        else:
+            print("unsupported protocol")
+            client_sock.close()
+            return
+
         # if host was missing then try to extract it from the url
         if request_host is None:
-            request_host = request_url[7:].split("/")[0]
+            if request_url.startswith("http://"):
+                request_host = request_url[7:].split("/")[0]
 
-        # if redirect flag is set then change the host and url
-        if REDIRECT_FLAG:
-            request_host = PARAM_REDIRECT_HOST
-            request_url = PARAM_REDIRECT_URL
+        if PARAM_DEBUG_URLPARSE:
+            print("PARSED HOST:", request_host)
+            print("PARSED PATH:", path)
+            print("PROTOCOL:", request_protocol)
 
         # if the host is still missing then return
         if request_host is None:
             print("critical error: host information is missing")
+            client_sock.close()
             return
+
+        if request_protocol == "HTTP/1.1":
+            # the final thing that goes into the request line
+            request_url = path
+        else:
+            # is HTTP/1.0
+            # the final thing that goes into the request line
+            request_url = "http://" + request_host + path  # nothing changes basically
+
+        if PARAM_DEBUG_URLPARSE:
+            # these are not even correct lmao sorry
+            print("REDIRECT FLAG:", REDIRECT_FLAG)
+            print("HTTP/1.1 redirected url:", PARAM_REDIRECT_PATH)
+            print("HTTP/1.1 redirected host:", PARAM_REDIRECT_HOST)
+            print("HTTP/1.1 non redirected url:", request_url)
+            print("HTTP/1.1 non redirected host:", request_host)
+
+            print("HTTP/1.0 redirected url:", "http://" + PARAM_REDIRECT_HOST + path)
+            print("HTTP/1.0 non redirected url:", "http://" + request_host + path)
+
+        # if redirect flag is set then change the host and url
+        if REDIRECT_FLAG:
+            if request_protocol == "HTTP/1.1":
+                request_url = path
+                request_host = PARAM_REDIRECT_HOST
+                # override the host header
+                request_headers["Host"] = PARAM_REDIRECT_HOST
+            else:
+                # is HTTP/1.0
+                request_url = "http://" + PARAM_REDIRECT_HOST + path
+                request_host = PARAM_REDIRECT_HOST
 
         # create a new socket to make the request
         request_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         request_sock.connect((request_host, 80))
+
+        # global reference to the request socket so we can shut it down later immediately
+        request_sock_global_ref = request_sock
 
         # print the server connection
         print_server_connected(request_host, 80)
@@ -230,6 +322,7 @@ def request_handler(client_sock, client_addr):
             "Trailer",
             "Transfer-Encoding",
             "Upgrade",
+            "Proxy-Connection",
         ]
 
         # remove the hop-by-hop headers
@@ -237,34 +330,19 @@ def request_handler(client_sock, client_addr):
             if request_header in request_headers:
                 del request_headers[request_header]
 
-        # # add connection close header
-        # request_headers["Connection"] = "close"
+        # add connection close header
+        request_headers["Connection"] = "close"
 
-        path = None
-
-        if request_protocol == "HTTP/1.1":
-            # extract only the path
-            if request_url.startswith("http://"):
-                without_scheme = request_url[7:]
-                slash_idx = without_scheme.find("/")
-                if slash_idx != -1:
-                    path = without_scheme[slash_idx:]
-                else:
-                    # no path means just '/'
-                    path = "/"
-            else:
-                # URL doesn't start with http://, assume it's already a relative path
-                path = request_url
-        else:
-            path = request_url
-
-        if PARAM_DEBUG:
+        if PARAM_DEBUG_DATA:
             print("forwarding request:")
+            print(f"{request_method} {request_url} {request_protocol}")
             print(request_headers)
             print(request_data)
 
         # create the new request
-        forwarded_request = f"{request_method} {path} {request_protocol}\r\n".encode()
+        forwarded_request = (
+            f"{request_method} {request_url} {request_protocol}\r\n".encode()
+        )
 
         # add the headers
         for key, value in request_headers.items():
@@ -279,6 +357,8 @@ def request_handler(client_sock, client_addr):
         # send the request to the server
         request_sock.send(forwarded_request)
 
+        print(forwarded_request)
+
         # print the forwarded request
         print_stage_line(1)
         print(f"  > {request_method} {path}")
@@ -290,6 +370,7 @@ def request_handler(client_sock, client_addr):
         while True:
             chunk = request_sock.recv(PARAM_RECV_BUF_SIZE)
             if not chunk:
+                print("SOCKET CONNECGTIION CLOSED")
                 break
             data += chunk
 
@@ -316,10 +397,10 @@ def request_handler(client_sock, client_addr):
                 key, value = line.split(":", 1)
                 response_headers[key.strip()] = value.strip()
 
-        if PARAM_DEBUG:
+        if PARAM_DEBUG_DATA:
             print("received response:")
             print(response_headers)
-            print(response_data)
+            # print(response_data)
 
         # print the response
         print_stage_line(2)
@@ -330,7 +411,7 @@ def request_handler(client_sock, client_addr):
             )
         else:
             # if either of the headers is missing then we stay silent
-            if PARAM_DEBUG:
+            if PARAM_DEBUG_DATA:
                 print("  > the response did not contain MIME Type or Content-Length")
 
         response_content_type = None
@@ -344,7 +425,6 @@ def request_handler(client_sock, client_addr):
             and "image" in response_content_type
         ):
             # modify the response to send 404
-
             # modify the response line
             # do not modify the protocol
             response_protocol = response_protocol
@@ -358,6 +438,16 @@ def request_handler(client_sock, client_addr):
 
             # data is empty
             response_data = b""
+
+        if PARAM_CACHE_INVALIDATE:
+            # add pragma: no-cache
+            response_headers["Pragma"] = "no-cache"
+
+            # add Cache-Control: no-cache, no-store, must-revalidate
+            response_headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+
+            # add Expires: 0
+            response_headers["Expires"] = "0"
 
         # reassemble the response
         forwarded_response = (
@@ -377,12 +467,10 @@ def request_handler(client_sock, client_addr):
         # send the response to the client
         client_sock.send(forwarded_response)
 
-        print("IM GAYYYYYYYYYYYYYYYYYYY: ", forwarded_response == data)
-
-        if PARAM_DEBUG:
+        if PARAM_DEBUG_DATA:
             print("forwarding response:")
             print(response_headers)
-            print(response_data)
+            # print(response_data)
 
         # print the forwarded response
         print_stage_line(3)
@@ -393,7 +481,7 @@ def request_handler(client_sock, client_addr):
             )
         else:
             # if either of the headers is missing then we stay silent
-            if PARAM_DEBUG:
+            if PARAM_DEBUG_DATA:
                 print("  > the response did not contain MIME Type or Content-Length")
 
         # close the sockets
@@ -403,6 +491,9 @@ def request_handler(client_sock, client_addr):
         # print disconnect messages
         print_client_disconnected()
         print_server_disconnected()
+
+        # reset the flags
+        REDIRECT_FLAG = False
 
         return
 
@@ -417,7 +508,7 @@ if __name__ == "__main__":
 
     try:
         # parse arguments if not debug launch
-        if not PARAM_DEBUG:
+        if not PARAM_DEBUG_DATA:
             parse_arguments()
 
         print(f"Starting proxy server on port {PARAM_PORT}")
@@ -429,10 +520,14 @@ if __name__ == "__main__":
         accept_socket.listen(PARAM_MAX_QUEUED_CONNECTIONS)
 
         while True:
+            if PARAM_DEBUG_MAINLOOP:
+                print("waiting for connection...")
             sock, addr = accept_socket.accept()
-
-            # handle request
+            if PARAM_DEBUG_MAINLOOP:
+                print("connection accepted")
             request_handler(sock, addr)
+            if PARAM_DEBUG_MAINLOOP:
+                print("request handled")
 
     except KeyboardInterrupt:
         print("exiting on SIGINT")
@@ -443,5 +538,8 @@ if __name__ == "__main__":
 
         if sock is not None:
             sock.close()
+
+        if request_sock_global_ref is not None:
+            request_sock_global_ref.close()
 
         sys.exit(0)
