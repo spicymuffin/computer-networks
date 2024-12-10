@@ -11,7 +11,7 @@ PARAM_DEBUG_DATA = False
 PARAM_DEBUG_RECV = False
 PARAM_DEBUG_OPTIONS = False
 PARAM_DEBUG_MAINLOOP = False
-PARAM_DEBUG_URLPARSE = True
+PARAM_DEBUG_URLPARSE = False
 
 PARAM_CACHE_INVALIDATE = True
 
@@ -76,7 +76,6 @@ def print_param_line(ip, port, redirected, filtered):
     print(
         f"{transaction_counter} [{'X' if redirected == False else 'O'}] Redirected [{'X' if filtered == False else 'O'}] Image filter"
     )
-    print(f"[CLI connected to {ip}:{port}]")
     transaction_counter += 1
 
 
@@ -159,7 +158,7 @@ def request_handler(client_sock, client_addr):
         # split the header into lines
         lines = request_header_decoded.split("\n")
 
-        print(lines)
+        # print(lines)
 
         # parse request line
         request_line = lines[0]
@@ -206,9 +205,11 @@ def request_handler(client_sock, client_addr):
             client_addr[0], client_addr[1], REDIRECT_FLAG, IMAGE_FILTER_STATE
         )
 
+        print_client_connected(client_addr[0], client_addr[1])
+
         # print the request
         print_stage_line(0)
-        print(f"  > {request_method} {request_url} {request_protocol}")
+        print(f"  > {request_method} {request_url}")
 
         # parse user agent to print
         if request_user_agent is not None:
@@ -273,7 +274,8 @@ def request_handler(client_sock, client_addr):
 
         if request_protocol == "HTTP/1.1":
             # the final thing that goes into the request line
-            request_url = path
+            # request_url = path
+            pass
         else:
             # is HTTP/1.0
             # the final thing that goes into the request line
@@ -344,6 +346,8 @@ def request_handler(client_sock, client_addr):
             f"{request_method} {request_url} {request_protocol}\r\n".encode()
         )
 
+        # print(f"REQUEST: {forwarded_request}")
+
         # add the headers
         for key, value in request_headers.items():
             forwarded_request += f"{key}: {value}\r\n".encode()
@@ -357,11 +361,12 @@ def request_handler(client_sock, client_addr):
         # send the request to the server
         request_sock.send(forwarded_request)
 
-        print(forwarded_request)
+        # TODO: check redirections
+        # print(forwarded_request)
 
         # print the forwarded request
         print_stage_line(1)
-        print(f"  > {request_method} {path}")
+        print(f"  > {request_method} {request_url}")
         print(f"  > {request_user_agent_parsed[0]} {request_user_agent_parsed[1]}")
 
         data = b""
@@ -370,7 +375,6 @@ def request_handler(client_sock, client_addr):
         while True:
             chunk = request_sock.recv(PARAM_RECV_BUF_SIZE)
             if not chunk:
-                print("SOCKET CONNECGTIION CLOSED")
                 break
             data += chunk
 
@@ -410,6 +414,8 @@ def request_handler(client_sock, client_addr):
                 f"  > {response_headers['Content-Type']} {response_headers['Content-Length']} bytes"
             )
         else:
+            # print("Content-Type" in response_headers)
+            # print("Content-Length" in response_headers)
             # if either of the headers is missing then we stay silent
             if PARAM_DEBUG_DATA:
                 print("  > the response did not contain MIME Type or Content-Length")
@@ -440,14 +446,8 @@ def request_handler(client_sock, client_addr):
             response_data = b""
 
         if PARAM_CACHE_INVALIDATE:
-            # add pragma: no-cache
-            response_headers["Pragma"] = "no-cache"
-
-            # add Cache-Control: no-cache, no-store, must-revalidate
+            # we invalidate the cache by injecting the following headers
             response_headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-
-            # add Expires: 0
-            response_headers["Expires"] = "0"
 
         # reassemble the response
         forwarded_response = (
